@@ -1,0 +1,275 @@
+---
+title: "Data Science as NYC Shooitng Data Final Report"
+output:
+  pdf_document: default
+  html_document: default
+date: '2022-11-09'
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+```
+
+
+
+# Step 1: Import Data
+The shooting database is a list of all shooting incidents in New York City from 2006 through the end of 2021. It also lists the location of the shooting, and the demographic characteristics of the victims and the suspects. I am going to be focusing the location and time of day of the shooting. 
+
+```{r message = FALSE}
+#Load the libraries used
+library(tidyverse)
+library(lubridate)
+library(modelr)
+
+```
+
+```{r import}
+#Load the data from the City of New York
+doc_url <- 'https://data.cityofnewyork.us/api/views/833y-fsy8/rows.csv?accessType=DOWNLOAD'
+pop_url <- 'https://data.cityofnewyork.us/api/views/xywu-7bv9/rows.csv?accessType=DOWNLOAD'
+df <- read_csv(doc_url)
+pop_df <- read_csv(pop_url)
+```
+# Step 2: Tidy and Transform Your Data
+The first thing I did was figure out how to deal with the duplicates of the incident keys. According to the footnotes[^1] for the data, there are multiple incident keys because:
+
+"A shooting incident can have multiple victims involved and as a result duplicate
+INCIDENT_KEY’s are produced. Each INCIDENT_KEY represents a victim but
+similar duplicate keys are counted as one incident."
+
+I thought I could use this to count the number of victims, but there were also multiple suspects with each incident, so I didn't feel it was a reliable way to count the number of victims. Instead, I deleted all rows with duplicate incident numbers. This allowed me to have an accurate count of incidents, but it isn't related to the number of victims.
+
+I then imported a separate dataset from the city of New York with the population from the borough in decennial census. This was then correlated with population of the census closest to the date if the shooting. This was used to determine incidents per 1000 people, for each borough.  
+
+[^1]: https://data.cityofnewyork.us/api/views/833y-fsy8/files/e4e3d86c-348f-4a16-a17f-19480c089429?download=true&filename=NYPD_Shootings_Incident_Level_Data_Footnotes.pdf
+
+
+```{r clean}
+#Remove duplicate rows with duplicate incident numbers. This allows the counting
+#of total incidents. This however, does not show the total number of victims.
+
+incidents <- df %>%
+        select(INCIDENT_KEY, BORO, OCCUR_DATE, OCCUR_TIME) %>%
+        distinct(INCIDENT_KEY, .keep_all = TRUE) %>%
+        mutate(OCCUR_DATE = mdy(OCCUR_DATE)) %>%
+        rename(
+          date = OCCUR_DATE,
+          borough = BORO, 
+          time = OCCUR_TIME, 
+          incident_key = INCIDENT_KEY)
+
+summary(incidents)
+
+#Clean up the population data, so it just shows the population for the borughs
+#for 2010 and 2020
+pop_data <-pop_df %>% select(Borough, '2010',"2020") %>%
+        rename(borough = Borough) %>%
+        mutate(borough = toupper(borough)) %>%
+        rename(yr_2010 = '2010', yr_2020 = '2020')
+#Dispaly the table
+pop_data
+
+#Join the population data for each borough to each incident. So we can analyse
+#this later. I decicded to just use the population data from 2010, instead of
+#trying to combine 2010 and 2010. I chose 2010, because most of the data from
+#this dataset is closer to 2010, than 2020
+incidents_with_pop <- incidents %>%
+        left_join(pop_data) %>%
+        mutate(incident_per_1000 = if_else(abs(date-mdy('1/1/2010')) < abs(date-mdy('1/1/2020')),(1000/yr_2010),(1000/yr_2020)))
+
+
+incidents_by_borough <- incidents_with_pop %>%
+        group_by(borough) %>%
+        summarise(total_incidents = n(), incidents_per_hour = sum(incident_per_1000))
+
+
+#This makes a tibble with incidents per hour. Also, to facilitate graphing
+#from noon to noon and 7 AM to 6 AM, to better show the trends throughout the day. 
+
+#The incidents not grouped, but have an hour column added
+incidents_with_hour <- incidents_with_pop %>%
+        mutate(hour = hour(time)) %>%
+        mutate(hour_for_graph=if_else(hour <= 12, hour+12, hour-12)) %>%
+        mutate(hour_for_graph_7=if_else(hour >= 7, hour-7, hour+17))
+
+incidents_per_hour <- incidents_with_hour %>%
+        group_by(borough, hour, hour_for_graph, hour_for_graph_7 ) %>%
+        summarise(total_incidents = n(), incidents_per_1000 = sum(incident_per_1000))
+
+incidents_per_hour_nb <- incidents_per_hour %>%
+        group_by(hour, hour_for_graph, hour_for_graph_7) %>%
+        summarise(total_incidents = sum(total_incidents))
+
+
+# incidents_per_month <- incidents_with_pop %>%
+#         mutate(month= month(date)) %>%
+#         group_by(month, borough) %>%
+#         summarise(total_incidents = n())
+
+incidents_per_month <- incidents_with_pop %>%
+        mutate(month_test = month(date)) %>%
+        group_by(month = lubridate::floor_date(date, 'month'), borough) %>%
+        summarise(total_incidents = n())
+        
+        
+# incidents_per_hour_month_nb <- incidents_with_pop %>%
+#         mutate(hour = hour(time)) %>%
+#         mutate(hour_for_graph=if_else(hour >= 5, hour-5, hour+19)) %>%
+#         group_by(month = lubridate::floor_date(date, 'month'), hour, hour_for_graph) %>%
+#         summarise(total_incidents = n())
+
+
+# incidents_per_month %>% ggplot() +
+#         geom_point(aes(x = month, y = total_incidents))
+
+```
+
+# Step 3a: Visualizations and Analysis- Part 1
+
+I initially plotted total shootings for each borough. However, I realized that Statan Island was way less than everything else. I then decided to combine this with borough population, thinking that a larger population would result in more shooting incidents. When I did this, not only did Staten Island seem to level out with other boroughs, the Bronx also overtook Brooklyn as the borough with the highest amount of shootings per 1000 people.
+
+I then graphed shootings per hour, per borough. However, I could see there was a peak, but it was split by the edges of the graph. I then graphed it so that the center of the graph would be midnight, and also a graph that started at 7 AM. 
+
+```{r plots}
+incidents_by_borough %>% ggplot() +
+        geom_col(aes(x = borough, y = total_incidents), fill = '#FF9999') +
+        labs(title = 'Total Incidents from 2006 to 2021 by Borough',
+             y = 'Incidents',
+             x = 'Borough')
+        
+incidents_by_borough %>% ggplot() +
+        geom_col(aes(x = borough, y = incidents_per_hour), fill = '#FF9999')  +
+        labs(title = 'Incidents per 1000 People from 2006 to 2021 by Borough',
+             y = 'Incidents per 1000',
+             x = 'Borough')
+
+#I wanted to plot the graph with values between noon and noon, instead of
+#between midnight, and midnight. To do this, I swapped AM and PM on the graph
+#and then used a false x axis ticks to show the correct times.
+x_ticks_hours_12 <- c('12','13','14','15','16','17','18','19','20','21','22',
+                      '23','0','1','2','3','4','5','6','7','8','9','10','11')
+x_ticks_hours_7 <- c('8','9','10','11','12','13','14','15','16','17','18',
+                     '19','20','21','22','23','0','1','2','3','4','5','6')
+
+x_ticks_hours_7_test <- c('7 AM','','','','','Noon','','','','','','',
+                     '7 PM','','','','','Midnight','','','','','','6 AM')
+
+#Graph of Shooting per 1000 people
+incidents_per_hour %>%
+        ggplot(aes(x = hour, y = incidents_per_1000)) +
+        geom_line(aes(color = borough)) +
+        labs(title = 'Incidents per 1000 people from 2006 to 2021, By hour',
+             y = 'Incidents per 1000 people',
+             x = 'Hour of the Day')
+
+#Graph of Shooting per 1000 people from noon to noon
+incidents_per_hour %>%
+        ggplot(aes(x = hour_for_graph, y = incidents_per_1000)) +
+        geom_line(aes(color = borough)) +
+        scale_x_discrete(limits = x_ticks_hours_12) +
+        labs(title = 'Incidents per 1000 people from 2006 to 2021, By hour',
+             y = 'Incidents per 1000 people',
+             x = 'Hour of the Day')
+#Graph of Shooting per 1000 people from 7 AM to 6AM
+
+incidents_per_hour %>%
+        ggplot(aes(x = hour_for_graph_7, y = incidents_per_1000)) +
+        geom_line(aes(color = borough)) +
+        scale_x_discrete(limits = x_ticks_hours_7) +
+        labs(title = 'Incidents per 1000 people from 2006 to 2021, By hour',
+             y = 'Incidents per 1000 people',
+             x = 'Hour of the Day',
+             color = 'Borough')
+
+incidents_per_hour_nb %>%
+        ggplot(aes(x = hour_for_graph_7, y = total_incidents)) + 
+        geom_line() +
+        scale_x_discrete(limits = x_ticks_hours_7) +
+        labs(title = 'Shooting Incidents from 2006 to 2021, By hour',
+             y = 'Shooting Incidents',
+             x = 'Hour of the Day')
+               
+# incidents_with_hour %>%
+#         ggplot()+
+#         geom_histogram(aes(x = hour_for_graph))
+
+#incidents_with_hour_5 %>% ggplot(aes(x = hour))
+        
+        
+
+```
+# Step 3b: Visualizations and Analysis- Part 2
+Looking at these charts brought many more questions to mind. It appears that the rates of shootings are higher in the Bronx and in Brooklyn. The other three boroughs are fairly consistent with each other. It would be interesting to dive into this question more. There are lots of possible factors that could play into this, and it is probably not just one. Those factors could include population density, socio-economic issues, etc. 
+
+I also ran a linear model over the combined dataset for all of the boroughs. There is an almost linear increase in incidents from 9 AM until 11 PM. It would be easy to say from this data that the risk of being involved in a shooting incident increases the later that you are out, up until 11 PM, at which point, the risk starts dropping. It then drops significantly at 5 AM.  However, this also raises more questions. The locations of the shootings would be another interesting avenue to explore. Location would have an effect on the chance that a random individual would be involved in a shooting incident. 
+```{r model}
+
+
+
+
+# #Create linear models for incidents per year
+# mod_year <-lm(sum_of_incidents ~ year, data = incidents_by_year)
+#incidents_by_year_with_pred <- incidents_by_year %>% 
+#   mutate(pred = predict(mod_year))
+# 
+# #Summary of the model
+# summary(mod_year)
+# 
+# #Plot of incidents by year, with a linear model
+# incidents_by_year_with_pred %>% ggplot() +
+#         geom_line(aes(x = year, y = sum_of_incidents), color = 'red') +
+#         geom_line(aes(x = year, y = pred), color = 'blue')
+# 
+# #Create linear models for incidents per year stopping at 2019
+# incidents_by_year_through_2016 <- incidents_by_year %>%
+#   filter(year < as.Date('2017-01-01'))
+# 
+# mod_year_through_2016 <-lm(sum_of_incidents ~ year, data = incidents_by_year_through_2016)
+# incidents_by_year_with_pred_2016 <- incidents_by_year_through_2016 %>% 
+#   mutate(pred = predict(mod_year_through_2016))
+# 
+# #Summary of the model
+# summary(mod_year_through_2016)
+# 
+# #Plot of incidents by year, with a linear model
+# incidents_by_year_with_pred_2016 %>% ggplot() +
+#         geom_line(aes(x = year, y = sum_of_incidents), color = 'red') +
+#         geom_line(aes(x = year, y = pred), color = 'blue') +
+#         labs(
+#           title = 'Shooting Incidents With Linear Model from 2006-2016', 
+#           x = 'Year',
+#           y = 'Number of Incidents')
+
+total_incidents_nb_9_23 <- incidents_per_hour_nb %>%
+        filter(hour <=23 && hour >= 9) %>%
+        select(hour, total_incidents) 
+mod_total_incidents <- lm(total_incidents ~ hour, data = total_incidents_nb_9_23)
+
+#mod_total_incidents_predictions<-predict(mod_total_incidents, newdata = total_incidents_nb, interval = 'confidence') %>% mutate(hour = row_number())
+
+total_incidents_nb_pred <- total_incidents_nb_9_23 %>% 
+   add_predictions(mod_total_incidents)
+
+total_incidents_nb_pred %>% ggplot() +
+        geom_line(aes(x = hour, y = total_incidents), color = 'red') +
+        geom_line(aes(x = hour, y = pred), color = 'blue') +
+        labs(title = 'Total Incidents from 9 AM to 11 PM',
+             x = 'Hour',
+             y = 'Incidents')
+
+
+
+```
+
+# Step 4: Conclusion
+While there is some variation from borough to borough, there is a steady increase in shootings from about 7 AM and peaking at 11 PM, which it steadily declines until about 5 AM, where there is a significant drop off until the climb begins at 9 AM. There is also more shootings per 1000 people in both the Bronx and Brooklyn, compared to the other five boroughs.
+
+There are many ways that you could continue this study. As mentioned previously, one could explore the reason that Brooklyn and the Bronks have higher rates of shooting. This is certainly a complicated question, and would not have an easy answer. There are lots of different variables that could be causing this. Many of those variables involve thorny socioeconomic questions.  One could also look at the rates of shootings over time and see if there has been any change in the frequency of shootings in different parts of NYC. This could be done by not looking at the dataset as a whole from 2006 to 2021, but instead breaking it up into smaller chunks.
+
+Another question that could be explored further would be is there any relationship between the time of day of shootings, and the location of the shooting.
+
+There is certainly room for bias in the dataset. This data is collected by the NYPD, which as an organization that relies on politicians for its budget. Any organization in the position certainly has a narrative, that they want to tell. There is also my bias about New York City. This is not a city that I have much familiarity with, except through the media. On that basis, it would be difficult for me to make any kind speculation about why there are different rates of shooting incidents in different boroughs. That is one way I mitigated this is by not making any snap judgments about why the shooting numbers might be different. For me to be able to make any kind of conclusion about why things, I would have to look at more data, and also increase my general knowledge of NY considerably. 
+``` {R appendix}
+sessionInfo()
+```
